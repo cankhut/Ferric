@@ -14,7 +14,7 @@ It was mainly done to get better and learn Rust as I've mentioned.
 
 You can either get it from [Releases](../../releases)
 
-Or build it yourself with [Rust](https://rustup.rs):
+Or build it yourself with Rust:
 
 ```
 cargo run --release
@@ -43,7 +43,7 @@ Album covers and searches come from **Deezer** and **iTunes**.
 ## Building
 
 ```
-cargo build --release   # target/release/ferric.exe is what you ship
+cargo build --release
 cargo test
 cargo clippy
 ```
