@@ -2,6 +2,30 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One song on an album, and what you made of it.
+///
+/// The title comes from the catalogue and never changes; the rating is
+/// yours and starts as nothing. Rating songs is optional — most albums
+/// will only ever have the one rating on the album itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Track {
+    pub title: String,
+
+    /// 1 to 10, the same scale the album uses, or None if you have not
+    /// rated this song
+    #[serde(default)]
+    pub rating: Option<u8>,
+}
+
+impl Track {
+    pub fn new(title: impl Into<String>) -> Self {
+        Track {
+            title: title.into(),
+            rating: None,
+        }
+    }
+}
+
 /// An album you have in your library, with your own rating on it.
 ///
 /// Everything that comes from a website is optional, because a website can
@@ -33,6 +57,12 @@ pub struct Album {
 
     #[serde(default)]
     pub deezer_id: Option<u64>,
+
+    /// The album's songs in order, each with a rating of its own. Empty
+    /// until the panel is opened and the catalogue is asked, and empty
+    /// forever for an album the catalogue has no track list for.
+    #[serde(default)]
+    pub tracks: Vec<Track>,
 
     /// yyyy-mm-dd, the day you added it
     #[serde(default)]
@@ -69,10 +99,33 @@ impl Album {
             cover_url: None,
             itunes_id: None,
             deezer_id: None,
+            tracks: Vec::new(),
             added_on: today(),
             custom_position: None,
             looked_up: false,
         }
+    }
+
+    /// The average of the songs you have rated, on the same 1 to 10 scale
+    /// the album itself uses. `None` until at least one song is rated.
+    ///
+    /// Deliberately separate from `rating`: this is what the songs add up
+    /// to, that is what you think of the record. An album can be more than
+    /// its tracks, and the app does not argue with you about it.
+    pub fn track_average(&self) -> Option<f32> {
+        let rated: Vec<u8> = self
+            .tracks
+            .iter()
+            .filter_map(|track| track.rating)
+            .collect();
+
+        if rated.is_empty() {
+            return None;
+        }
+
+        let total: u32 = rated.iter().map(|&rating| rating as u32).sum();
+
+        Some(total as f32 / rated.len() as f32)
     }
 
     /// Does this album match what was typed in the filter box? Artist, title
@@ -186,6 +239,41 @@ pub fn clean_title(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overall_counts_only_the_songs_you_rated() {
+        let mut album = Album::new("Maruja", "Pain to Power");
+
+        album.tracks = vec![Track::new("one"), Track::new("two"), Track::new("three")];
+
+        // Nothing rated yet, so there is nothing to average
+        assert_eq!(album.track_average(), None);
+
+        album.tracks[0].rating = Some(8);
+        album.tracks[2].rating = Some(6);
+
+        // The unrated song in the middle does not drag it down
+        assert_eq!(album.track_average(), Some(7.0));
+    }
+
+    #[test]
+    fn the_overall_does_not_touch_what_you_gave_the_album() {
+        let mut album = Album::new("Maruja", "Pain to Power");
+
+        album.rating = Some(10);
+        album.tracks = vec![Track::new("one"), Track::new("two")];
+        album.tracks[0].rating = Some(4);
+        album.tracks[1].rating = Some(4);
+
+        // You said five stars; the songs say two. Both stand
+        assert_eq!(album.rating, Some(10));
+        assert_eq!(album.track_average(), Some(4.0));
+    }
+
+    #[test]
+    fn an_album_with_no_tracks_has_no_overall() {
+        assert_eq!(Album::new("A", "one").track_average(), None);
+    }
 
     #[test]
     fn strips_the_decorations_itunes_adds() {

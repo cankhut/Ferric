@@ -146,4 +146,34 @@ mod tests {
 
         assert!(results.is_empty());
     }
+
+    #[test]
+    fn a_short_record_is_marked_as_one() {
+        // Apple files singles and EPs under `entity=album` with everything
+        // else, and the track count is the only thing telling them apart.
+        // They are kept and ranked below the albums, see `search::score`
+        let body = r#"{
+          "resultCount": 3,
+          "results": [
+            { "artistName": "A", "collectionName": "a single", "trackCount": 1 },
+            { "artistName": "A", "collectionName": "an ep", "trackCount": 3 },
+            { "artistName": "A", "collectionName": "a record", "trackCount": 11 }
+          ]
+        }"#;
+
+        let results = parse(body).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].kind, Kind::Short);
+        assert_eq!(results[1].kind, Kind::Short);
+        assert_eq!(results[2].kind, Kind::Album);
+    }
+
+    #[test]
+    fn a_record_apple_gives_no_count_for_is_taken_as_an_album() {
+        // Guessing "short" from a missing number would bury real albums
+        let results = parse(SAMPLE).unwrap();
+
+        assert_eq!(results[0].kind, Kind::Album);
+    }
 }

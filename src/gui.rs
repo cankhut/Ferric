@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, RichText, Stroke};
 
-use ferric::album::{clean_title, Album};
+use ferric::album::{clean_title, Album, Track};
 use ferric::deezer;
 use ferric::discogs;
 use ferric::library::{Library, Sort};
@@ -103,6 +103,16 @@ const COVERS_KEPT: usize = 120;
 /// The cog in the bottom corner
 const COG: f32 = 9.0;
 
+/// The stars on a song, a little smaller than the album's own so the list
+/// reads as a list rather than as a column of album ratings
+const TRACK_STAR_STEP: f32 = 17.0;
+const TRACK_STAR_SIZE: f32 = 15.0;
+
+/// Kept clear on the right of a track row for the panel's scroll bar,
+/// which is drawn over the content rather than beside it and otherwise
+/// sits on top of the fifth star
+const SCROLL_GUTTER: f32 = 16.0;
+
 /// How tall everything in the top bar is, so the search box, the sort menu
 /// and the filter all line up instead of each sizing itself
 const TOP_ROW: f32 = 24.0;
@@ -168,12 +178,20 @@ enum Lookup {
         deezer_id: u64,
         why: Why,
     },
+    /// The album's songs, asked for once when you first open its panel
+    Tracks {
+        key: Key,
+        deezer_id: u64,
+    },
 }
 
 impl Lookup {
     fn why(&self) -> Why {
         match self {
             Lookup::Tags { why, .. } | Lookup::Year { why, .. } => *why,
+            // Only ever asked for because you opened an album, so it goes
+            // in front of the background fill-in like anything else you did
+            Lookup::Tracks { .. } => Why::Asked,
         }
     }
 
@@ -204,6 +222,14 @@ impl Lookup {
 
                 Message::Year { key, year, why }
             }
+            Lookup::Tracks { key, deezer_id } => {
+                // The same page the year comes from carries the track list
+                let titles = deezer::details(deezer_id)
+                    .map(|details| details.tracks)
+                    .unwrap_or_default();
+
+                Message::Tracks { key, titles }
+            }
         }
     }
 }
@@ -221,6 +247,10 @@ enum Message {
         key: Key,
         year: Option<u16>,
         why: Why,
+    },
+    Tracks {
+        key: Key,
+        titles: Vec<String>,
     },
 }
 
@@ -289,6 +319,11 @@ pub struct Gui {
 
     /// Albums whose tags you asked for that are still on their way
     asked_for_tags: HashSet<Key>,
+
+    /// Albums whose track list has been asked for, so opening the same
+    /// panel twice does not ask twice, and an album Deezer has no tracks
+    /// for is not asked about again every time you click it
+    asked_for_tracks: HashSet<Key>,
     backfill: Backfill,
 }
 
@@ -395,6 +430,7 @@ impl Gui {
             lookups,
             messages,
             asked_for_tags: HashSet::new(),
+            asked_for_tracks: HashSet::new(),
             backfill: Backfill::default(),
         };
 
@@ -580,6 +616,7 @@ impl Gui {
                 }
                 Message::Tags { key, result, why } => self.tags_arrived(key, result, why),
                 Message::Year { key, year, why } => self.year_arrived(key, year, why),
+                Message::Tracks { key, titles } => self.tracks_arrived(key, titles),
             }
         }
     }
@@ -649,6 +686,67 @@ impl Gui {
         if why.quiet() {
             self.backfill_step(why);
         }
+    }
+
+    /// Asks for an album's songs, once, the first time you open its panel.
+    ///
+    /// Not fetched when the album is added: most albums are never opened,
+    /// and a track list nobody looks at is a request nobody needed.
+    fn ask_for_tracks(&mut self, index: usize) {
+        let Some(album) = self.library.get(index) else {
+            return;
+        };
+
+        // Already have them, or there is nowhere to ask
+        if !album.tracks.is_empty() {
+            return;
+        }
+
+        let Some(deezer_id) = album.deezer_id else {
+            return;
+        };
+
+        let key = Key::of(album);
+
+        if !self.asked_for_tracks.insert(key.clone()) {
+            return;
+        }
+
+        let _ = self.lookups.send(Lookup::Tracks { key, deezer_id });
+    }
+
+    fn tracks_arrived(&mut self, key: Key, titles: Vec<String>) {
+        if titles.is_empty() {
+            return;
+        }
+
+        let Some(album) = self.album_mut(&key) else {
+            return;
+        };
+
+        // Only ever filled in once. Rating a song and then having the list
+        // replaced underneath would lose what you said about it
+        if !album.tracks.is_empty() {
+            return;
+        }
+
+        album.tracks = titles.into_iter().map(Track::new).collect();
+
+        self.save_now();
+    }
+
+    fn set_track_rating(&mut self, index: usize, track: usize, rating: Option<u8>) {
+        let Some(album) = self.library.get_mut(index) else {
+            return;
+        };
+
+        let Some(song) = album.tracks.get_mut(track) else {
+            return;
+        };
+
+        song.rating = rating;
+
+        self.save_now();
     }
 
     fn year_arrived(&mut self, key: Key, year: Option<u16>, why: Why) {
@@ -1161,68 +1259,8 @@ impl Gui {
         rating: Option<u8>,
         designs: [usize; STARS as usize],
     ) {
-        // Hovering shows what the click would give you
-        let hovered = response
-            .hover_pos()
-            .filter(|position| rect.contains(*position))
-            .map(|position| rating_at(position.x, rect.left(), STAR_STEP));
-
-        let shown = hovered.or(rating).unwrap_or(0);
-        let colour = if hovered.is_some() {
-            GREEN_BRIGHT
-        } else {
-            GREEN
-        };
-
-        for (star, &design) in designs.iter().enumerate() {
-            let whole = Rect::from_min_size(
-                egui::pos2(rect.left() + STAR_STEP * star as f32, rect.top()),
-                egui::vec2(STAR_SIZE, STAR_SIZE),
-            );
-
-            // The drawing is white, so a tint is the whole of its colour
-            egui::Image::new(star_design(design))
-                .tint(STAR_EMPTY)
-                .paint_at(ui, whole);
-
-            // 0, 1 or 2 halves of this star are filled
-            let halves = shown.saturating_sub(star as u8 * 2).min(2);
-
-            if halves == 0 {
-                continue;
-            }
-
-            let part = halves as f32 / 2.0;
-
-            // Half a star is the left half of the same drawing: the left
-            // half of the picture, painted into the left half of the
-            // square. Clipping the shape rather than drawing a different
-            // one is what keeps a half star the same star
-            egui::Image::new(star_design(design))
-                .uv(Rect::from_min_max(
-                    egui::pos2(0.0, 0.0),
-                    egui::pos2(part, 1.0),
-                ))
-                .tint(colour)
-                .paint_at(
-                    ui,
-                    Rect::from_min_size(whole.min, egui::vec2(STAR_SIZE * part, STAR_SIZE)),
-                );
-        }
-
-        if response.clicked() {
-            if let Some(position) = response.interact_pointer_pos() {
-                let value = rating_at(position.x, rect.left(), STAR_STEP);
-
-                // Clicking the rating it already has takes it off again
-                let next = if rating == Some(value) {
-                    None
-                } else {
-                    Some(value)
-                };
-
-                self.set_rating(index, next);
-            }
+        if let Some(next) = star_row(ui, response, rect, rating, designs, STAR_STEP, STAR_SIZE) {
+            self.set_rating(index, next);
         }
     }
 
@@ -1359,7 +1397,121 @@ impl Gui {
 
                 ui.add_space(10.0);
                 ui.label(RichText::new(format!("added {added}")).color(MUTED).small());
+
+                self.track_list(ui, index);
             });
+    }
+
+    /// The album's songs, each with a rating of its own, and what they add
+    /// up to underneath.
+    ///
+    /// The total never touches the album's own stars. You might give the
+    /// record four when the songs average three and a half, and that is
+    /// allowed to be the case — a record is more than the mean of its
+    /// tracks, and the app does not correct you.
+    fn track_list(&mut self, ui: &mut egui::Ui, index: usize) {
+        // Opening the panel is what asks for them, once
+        self.ask_for_tracks(index);
+
+        let Some(album) = self.library.get(index) else {
+            return;
+        };
+
+        if album.tracks.is_empty() {
+            // Still on its way, as opposed to an album Deezer has no track
+            // list for, which says nothing rather than waiting forever
+            if self.asked_for_tracks.contains(&Key::of(album)) && album.deezer_id.is_some() {
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new("looking up the tracks...")
+                        .color(MUTED)
+                        .small(),
+                );
+            }
+
+            return;
+        }
+
+        let titles: Vec<String> = album.tracks.iter().map(|t| t.title.clone()).collect();
+        let ratings: Vec<Option<u8>> = album.tracks.iter().map(|t| t.rating).collect();
+        let designs = designs_for(seed_of(&album.artist, &album.title));
+        let average = album.track_average();
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.label(RichText::new("tracks").color(MUTED).small());
+        ui.add_space(6.0);
+
+        let row_width = TRACK_STAR_STEP * STARS as f32;
+
+        for (number, title) in titles.iter().enumerate() {
+            ui.horizontal(|ui| {
+                // The stars keep their width whatever the title does, so a
+                // long song name shortens instead of pushing them off. The
+                // gutter is what stops the scroll bar covering the last one
+                let text_width =
+                    (ui.available_width() - row_width - 10.0 - SCROLL_GUTTER).max(60.0);
+
+                ui.vertical(|ui| {
+                    ui.set_width(text_width);
+                    ui.add(egui::Label::new(RichText::new(title).color(TEXT).small()).truncate());
+                });
+
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(row_width, TRACK_STAR_SIZE),
+                    egui::Sense::click(),
+                );
+
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+                if let Some(next) = star_row(
+                    ui,
+                    &response,
+                    rect,
+                    ratings[number],
+                    designs,
+                    TRACK_STAR_STEP,
+                    TRACK_STAR_SIZE,
+                ) {
+                    self.set_track_rating(index, number, next);
+                }
+            });
+
+            ui.add_space(3.0);
+        }
+
+        ui.add_space(8.0);
+
+        // Only what you have actually rated counts, so half an album rated
+        // is still a useful number rather than one dragged down by zeroes
+        match average {
+            Some(average) => {
+                let rated = ratings.iter().filter(|rating| rating.is_some()).count();
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Overall").color(MUTED).small());
+                    ui.label(
+                        RichText::new(format!("{:.1}", average / 2.0))
+                            .color(GREEN)
+                            .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!("from {rated} of {}", titles.len()))
+                            .color(HINT)
+                            .small(),
+                    );
+                });
+            }
+            None => {
+                ui.label(
+                    RichText::new("Rate the songs for an overall")
+                        .color(HINT)
+                        .small(),
+                );
+            }
+        }
     }
 
     /// The results, hanging under the search box.
@@ -1996,6 +2148,89 @@ fn spawn_looker(ctx: egui::Context, answers: Sender<Message>) -> Sender<Lookup> 
     });
 
     lookups
+}
+
+/// Draws a row of stars and says what a click asked for.
+///
+/// Shared by the album's own rating and by each song on it, so a track is
+/// rated by the same halves, the same drawings and the same click-the-same-
+/// spot-to-clear rule. `step` and `size` are the only difference: the track
+/// rows are drawn smaller.
+///
+/// Returns `Some(next)` only on a click — `Some(None)` means the rating was
+/// cleared, and `None` means nothing was clicked at all.
+#[allow(clippy::too_many_arguments)]
+fn star_row(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    rect: Rect,
+    rating: Option<u8>,
+    designs: [usize; STARS as usize],
+    step: f32,
+    size: f32,
+) -> Option<Option<u8>> {
+    // Hovering shows what the click would give you
+    let hovered = response
+        .hover_pos()
+        .filter(|position| rect.contains(*position))
+        .map(|position| rating_at(position.x, rect.left(), step));
+
+    let shown = hovered.or(rating).unwrap_or(0);
+    let colour = if hovered.is_some() {
+        GREEN_BRIGHT
+    } else {
+        GREEN
+    };
+
+    for (star, &design) in designs.iter().enumerate() {
+        let whole = Rect::from_min_size(
+            egui::pos2(rect.left() + step * star as f32, rect.top()),
+            egui::vec2(size, size),
+        );
+
+        // The drawing is white, so a tint is the whole of its colour
+        egui::Image::new(star_design(design))
+            .tint(STAR_EMPTY)
+            .paint_at(ui, whole);
+
+        // 0, 1 or 2 halves of this star are filled
+        let halves = shown.saturating_sub(star as u8 * 2).min(2);
+
+        if halves == 0 {
+            continue;
+        }
+
+        let part = halves as f32 / 2.0;
+
+        // Half a star is the left half of the same drawing: the left half
+        // of the picture, painted into the left half of the square.
+        // Clipping the shape rather than drawing a different one is what
+        // keeps a half star the same star
+        egui::Image::new(star_design(design))
+            .uv(Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(part, 1.0),
+            ))
+            .tint(colour)
+            .paint_at(
+                ui,
+                Rect::from_min_size(whole.min, egui::vec2(size * part, size)),
+            );
+    }
+
+    if !response.clicked() {
+        return None;
+    }
+
+    let position = response.interact_pointer_pos()?;
+    let value = rating_at(position.x, rect.left(), step);
+
+    // Clicking the rating it already has takes it off again
+    Some(if rating == Some(value) {
+        None
+    } else {
+        Some(value)
+    })
 }
 
 /// The settings cog, drawn rather than written.

@@ -74,6 +74,10 @@ pub fn parse(body: &str) -> Result<Vec<SearchResult>> {
 pub struct Details {
     pub year: Option<u16>,
     pub genres: Vec<String>,
+    /// The album's songs in order. Deezer puts them on the album's own
+    /// page, so the request that fetches the year brings these too and
+    /// nothing extra is asked for
+    pub tracks: Vec<String>,
 }
 
 pub fn details(deezer_id: u64) -> Result<Details> {
@@ -114,7 +118,24 @@ pub fn parse_details(body: &str) -> Details {
         })
         .unwrap_or_default();
 
-    Details { year, genres }
+    let tracks = album
+        .tracks
+        .map(|tracks| {
+            tracks
+                .data
+                .into_iter()
+                .filter_map(|track| track.title)
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Details {
+        year,
+        genres,
+        tracks,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +164,18 @@ struct Artist {
 struct AlbumDetails {
     release_date: Option<String>,
     genres: Option<Genres>,
+    tracks: Option<Tracks>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Tracks {
+    #[serde(default)]
+    data: Vec<TrackEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrackEntry {
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,10 +221,14 @@ mod tests {
     }"#;
 
     #[test]
-    fn reads_albums_and_leaves_singles_out() {
+    fn reads_albums_and_keeps_singles_below_them() {
         let results = parse(SAMPLE).unwrap();
 
-        assert_eq!(results.len(), 1);
+        // The album and the single both come back. Singles used to be
+        // thrown away here; they are kept now and ranked under the albums
+        // instead, so a single you search for by name can still be found.
+        // The third entry has no title at all and is no use to anyone
+        assert_eq!(results.len(), 2);
 
         let found = &results[0];
 
@@ -199,9 +236,15 @@ mod tests {
         assert_eq!(found.title, "amo");
         assert_eq!(found.deezer_id, Some(87404392));
         assert!(found.cover_url.as_deref().unwrap().contains("500x500"));
+        assert_eq!(found.kind, Kind::Album);
 
         // The search answer has no release date in it
         assert_eq!(found.year, None);
+
+        // Marked as the short record it is, which is what pushes it down
+        // the list in `search::score`
+        assert_eq!(results[1].title, "medicine");
+        assert_eq!(results[1].kind, Kind::Short);
     }
 
     #[test]
@@ -230,7 +273,48 @@ mod tests {
 
         assert_eq!(details.year, None);
         assert!(details.genres.is_empty());
+        assert!(details.tracks.is_empty());
 
         assert_eq!(parse_details("not json").year, None);
+    }
+
+    #[test]
+    fn the_track_list_comes_back_in_order() {
+        let body = r#"{
+          "id": 87404392,
+          "title": "amo",
+          "tracks": { "data": [
+            { "title": "i apologise if you feel something" },
+            { "title": "MANTRA" },
+            { "title": "nihilist blues" }
+          ] }
+        }"#;
+
+        let details = parse_details(body);
+
+        assert_eq!(
+            details.tracks,
+            vec![
+                "i apologise if you feel something",
+                "MANTRA",
+                "nihilist blues"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_track_with_no_name_is_left_out_rather_than_listed_blank() {
+        let body = r#"{
+          "id": 1,
+          "tracks": { "data": [
+            { "title": "one" },
+            { "id": 99 },
+            { "title": "   " },
+            { "title": " two " }
+          ] }
+        }"#;
+
+        // Trimmed, and the nameless and empty ones never reach the panel
+        assert_eq!(parse_details(body).tracks, vec!["one", "two"]);
     }
 }
