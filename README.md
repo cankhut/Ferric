@@ -1,10 +1,13 @@
-# Ferric
+# <img src="assets/icon.png" width="40" align="top" alt=""> Ferric
 
 A desktop app for rating the albums you listen to. Look one up, rate them out of five stars.
 
 It's my first complete app I've made using Rust. 
 It's just a hobby project so I doubt it will recieve many updates. 
 It was mainly done to get better and learn Rust as I've mentioned.
+
+
+![Ferric](assets/ferric-screenshot.png)
 
 
 ## Getting it
