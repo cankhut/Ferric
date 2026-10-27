@@ -1,3 +1,5 @@
 /target
 *.log
 library.json
+
+/.idea
